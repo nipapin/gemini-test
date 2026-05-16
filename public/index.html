@@ -4,6 +4,10 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Photo Restoration</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="apple-touch-icon" href="/favicon.svg" />
+        <meta name="theme-color" content="#7c5cff" />
+        <meta name="description" content="Восстановление старых и повреждённых фотографий с помощью ИИ." />
         <style>
             :root {
                 --bg-0: #0b0d12;
@@ -502,7 +506,7 @@
                     const res = await fetch("/api/restore", { method: "POST", body: form });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || "Не удалось восстановить");
-                    originalImg.src = data.original;
+                    originalImg.src = previewUrl || data.original || "";
                     restoredImg.src = data.restored;
                     downloadLink.href = data.restored;
                     resultEl.classList.add("show");

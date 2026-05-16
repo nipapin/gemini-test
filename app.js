@@ -1,11 +1,16 @@
 import express from "express";
 import multer from "multer";
 import { GoogleGenAI } from "@google/genai";
-import fs from "fs";
+import {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand,
+    ListObjectsV2Command,
+} from "@aws-sdk/client-s3";
+import { Readable } from "stream";
 import path from "path";
 import crypto from "crypto";
 import sharp from "sharp";
-import mime from "mime-types";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 
@@ -15,14 +20,32 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, ".env") });
 
 const PORT = process.env.PORT || 3000;
-const ROOT = __dirname;
-const UPLOADS_DIR = path.join(ROOT, "uploads");
-const RESTORATIONS_DIR = path.join(ROOT, "restorations");
-const PUBLIC_DIR = path.join(ROOT, "public");
+const PUBLIC_DIR = path.join(__dirname, "public");
 
-for (const dir of [UPLOADS_DIR, RESTORATIONS_DIR, PUBLIC_DIR]) {
-    fs.mkdirSync(dir, { recursive: true });
+const S3_ENDPOINT = process.env.S3_URL;
+const S3_BUCKET = process.env.S3_BUCKET || process.env.BUCKET_NAME;
+const S3_REGION = process.env.S3_REGION || "ru-1";
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY;
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY;
+
+if (!S3_ENDPOINT || !S3_BUCKET || !S3_ACCESS_KEY || !S3_SECRET_KEY) {
+    console.error(
+        "[FATAL] S3 config is incomplete. Required env vars: S3_URL, S3_BUCKET (or BUCKET_NAME), S3_ACCESS_KEY, S3_SECRET_KEY (S3_REGION optional)"
+    );
+    process.exit(1);
 }
+
+const s3 = new S3Client({
+    region: S3_REGION,
+    endpoint: S3_ENDPOINT,
+    forcePathStyle: true,
+    credentials: {
+        accessKeyId: S3_ACCESS_KEY,
+        secretAccessKey: S3_SECRET_KEY,
+    },
+});
+
+const RESTORED_PREFIX = "restorations/";
 
 const Logger = {
     info: (...args) => console.log("[INFO]", ...args),
@@ -73,13 +96,25 @@ const resizeToOriginalSize = async (buffer, sourceBuffer) => {
     return await sharp(buffer).resize(width, height).toBuffer();
 };
 
-const restoreImage = async ({ base64Image, mimeType, userPrompt }) => {
-    const promptText = userPrompt && userPrompt.trim()
-        ? userPrompt.trim()
-        : "Restore this photograph. Remove all damage and signs of aging while keeping every person, object, and detail exactly as in the original.";
+const uploadToS3 = async (key, body, contentType) => {
+    await s3.send(
+        new PutObjectCommand({
+            Bucket: S3_BUCKET,
+            Key: key,
+            Body: body,
+            ContentType: contentType,
+        })
+    );
+};
+
+const restoreImage = async ({ buffer, mimeType, userPrompt }) => {
+    const promptText =
+        userPrompt && userPrompt.trim()
+            ? userPrompt.trim()
+            : "Restore this photograph. Remove all damage and signs of aging while keeping every person, object, and detail exactly as in the original.";
 
     const contents = [
-        { inlineData: { mimeType, data: base64Image } },
+        { inlineData: { mimeType, data: buffer.toString("base64") } },
         { text: promptText },
     ];
 
@@ -96,8 +131,7 @@ const restoreImage = async ({ base64Image, mimeType, userPrompt }) => {
         },
     });
 
-    const candidate = response.candidates?.[0];
-    const content = candidate?.content;
+    const content = response.candidates?.[0]?.content;
     if (!content?.parts) {
         Logger.error("restoreImage: empty response content");
         return null;
@@ -106,11 +140,10 @@ const restoreImage = async ({ base64Image, mimeType, userPrompt }) => {
     for (const part of content.parts) {
         if (part.inlineData) {
             const fileName = crypto.randomUUID() + ".png";
-            const filePath = path.join(RESTORATIONS_DIR, fileName);
-            const buffer = Buffer.from(part.inlineData.data, "base64");
-            const sourceBuffer = Buffer.from(base64Image, "base64");
-            fs.writeFileSync(filePath, await resizeToOriginalSize(buffer, sourceBuffer));
-            Logger.info("restoreImage: saved", fileName);
+            const restoredBuffer = Buffer.from(part.inlineData.data, "base64");
+            const finalBuffer = await resizeToOriginalSize(restoredBuffer, buffer);
+            await uploadToS3(`${RESTORED_PREFIX}${fileName}`, finalBuffer, "image/png");
+            Logger.info("restoreImage: uploaded to S3", fileName);
             return fileName;
         }
     }
@@ -119,13 +152,7 @@ const restoreImage = async ({ base64Image, mimeType, userPrompt }) => {
 };
 
 const upload = multer({
-    storage: multer.diskStorage({
-        destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-        filename: (_req, file, cb) => {
-            const ext = path.extname(file.originalname) || ".jpg";
-            cb(null, crypto.randomUUID() + ext);
-        },
-    }),
+    storage: multer.memoryStorage(),
     limits: { fileSize: 20 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
         if (!file.mimetype.startsWith("image/")) {
@@ -138,54 +165,98 @@ const upload = multer({
 const app = express();
 app.use(express.json());
 app.use(express.static(PUBLIC_DIR));
-app.use("/uploads", express.static(UPLOADS_DIR));
-app.use("/restorations", express.static(RESTORATIONS_DIR));
 
 app.post("/api/restore", upload.single("photo"), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: "No file uploaded" });
         }
-        const uploadedPath = req.file.path;
-        const base64Image = fs.readFileSync(uploadedPath, "base64");
-        const mimeType = req.file.mimetype || mime.lookup(uploadedPath) || "image/jpeg";
-        const userPrompt = (req.body?.prompt || "").toString();
-
-        Logger.info("restore request", { file: req.file.filename, mimeType, userPrompt });
-
-        const fileName = await restoreImage({ base64Image, mimeType, userPrompt });
+        Logger.info("restore request", {
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimeType: req.file.mimetype,
+        });
+        const fileName = await restoreImage({
+            buffer: req.file.buffer,
+            mimeType: req.file.mimetype || "image/jpeg",
+            userPrompt: (req.body?.prompt || "").toString(),
+        });
         if (!fileName) {
             return res.status(500).json({ error: "Restoration failed" });
         }
-
-        return res.json({
-            original: `/uploads/${req.file.filename}`,
-            restored: `/restorations/${fileName}`,
-        });
+        return res.json({ restored: `/restorations/${fileName}` });
     } catch (err) {
         Logger.error("restore error", err);
         return res.status(500).json({ error: err.message || "Server error" });
     }
 });
 
-app.get("/api/gallery", (_req, res) => {
+app.get("/restorations/:key", async (req, res) => {
+    const safeKey = req.params.key.replace(/[^\w.\-]/g, "");
+    if (!safeKey || safeKey !== req.params.key) {
+        return res.status(400).end();
+    }
+    const key = `${RESTORED_PREFIX}${safeKey}`;
     try {
-        const files = fs
-            .readdirSync(RESTORATIONS_DIR)
-            .filter((f) => /\.(png|jpe?g|webp)$/i.test(f))
-            .map((f) => {
-                const full = path.join(RESTORATIONS_DIR, f);
-                const stat = fs.statSync(full);
-                return { name: f, url: `/restorations/${f}`, mtime: stat.mtimeMs };
+        const out = await s3.send(
+            new GetObjectCommand({ Bucket: S3_BUCKET, Key: key })
+        );
+        if (out.ContentType) res.setHeader("Content-Type", out.ContentType);
+        if (out.ContentLength) res.setHeader("Content-Length", String(out.ContentLength));
+        if (out.LastModified) res.setHeader("Last-Modified", out.LastModified.toUTCString());
+        if (out.ETag) res.setHeader("ETag", out.ETag);
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+        const body = out.Body;
+        if (body instanceof Readable) {
+            body.on("error", (err) => {
+                Logger.error("s3 stream error", { key, err: err.message });
+                if (!res.headersSent) res.status(502).end();
+            });
+            body.pipe(res);
+        } else if (body && typeof body.transformToByteArray === "function") {
+            res.end(Buffer.from(await body.transformToByteArray()));
+        } else {
+            res.status(500).end();
+        }
+    } catch (err) {
+        if (err.$metadata?.httpStatusCode === 404 || err.name === "NoSuchKey") {
+            return res.status(404).end();
+        }
+        Logger.error("serve restoration error", { key, err: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/api/gallery", async (_req, res) => {
+    try {
+        const { Contents = [] } = await s3.send(
+            new ListObjectsV2Command({
+                Bucket: S3_BUCKET,
+                Prefix: RESTORED_PREFIX,
+                MaxKeys: 500,
+            })
+        );
+        const items = Contents.filter((o) => /\.(png|jpe?g|webp)$/i.test(o.Key || ""))
+            .map((o) => {
+                const name = o.Key.slice(RESTORED_PREFIX.length);
+                return {
+                    name,
+                    url: `/restorations/${name}`,
+                    mtime: o.LastModified?.getTime() ?? 0,
+                };
             })
             .sort((a, b) => b.mtime - a.mtime);
-        res.json({ items: files });
+        res.json({ items });
     } catch (err) {
         Logger.error("gallery error", err);
         res.status(500).json({ error: err.message });
     }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     Logger.info(`Photo restoration server is running at http://localhost:${PORT}`);
+    Logger.info(`S3 endpoint: ${S3_ENDPOINT} (bucket: ${S3_BUCKET}, region: ${S3_REGION})`);
 });
+server.requestTimeout = 0;
+server.headersTimeout = 120_000;

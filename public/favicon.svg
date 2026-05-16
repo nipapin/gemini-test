@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="geometricPrecision">
+    <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#7c5cff" />
+            <stop offset="1" stop-color="#5ad1ff" />
+        </linearGradient>
+        <linearGradient id="mountain" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#7c5cff" />
+            <stop offset="1" stop-color="#5340c2" />
+        </linearGradient>
+    </defs>
+
+    <rect width="64" height="64" rx="14" fill="url(#bg)" />
+
+    <rect x="11" y="15" width="42" height="34" rx="5" fill="#ffffff" />
+    <rect x="14" y="18" width="36" height="28" rx="3" fill="#1a1f2c" />
+
+    <circle cx="41" cy="26" r="3.5" fill="#ffd76b" />
+
+    <path d="M14 46 V38 L22 30 L29 36 L37 27 L46 36 L50 32 V46 Z" fill="url(#mountain)" />
+
+    <g fill="#ffffff">
+        <path d="M52 8 L53.4 11.6 L57 13 L53.4 14.4 L52 18 L50.6 14.4 L47 13 L50.6 11.6 Z" />
+        <circle cx="56" cy="6" r="1.6" />
+    </g>
+</svg>
