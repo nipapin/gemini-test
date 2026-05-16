@@ -7,11 +7,15 @@ import crypto from "crypto";
 import sharp from "sharp";
 import mime from "mime-types";
 import dotenv from "dotenv";
+import { fileURLToPath } from "url";
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 const PORT = process.env.PORT || 3000;
-const ROOT = process.cwd();
+const ROOT = __dirname;
 const UPLOADS_DIR = path.join(ROOT, "uploads");
 const RESTORATIONS_DIR = path.join(ROOT, "restorations");
 const PUBLIC_DIR = path.join(ROOT, "public");
